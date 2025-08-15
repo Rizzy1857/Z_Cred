@@ -1,519 +1,548 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import joblib
-import os
-import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime
-import shap
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import plotly.express as px
 
-# Import custom modules
-from generate_data import generate_synthetic_data
-from model_pipeline import train_and_save_models, load_models, predict_default_probability
-from local_db import (init_db, insert_applicant, get_applicants, update_applicant_scores, 
-                     get_single_applicant, get_sync_status, sync_data_to_csv, log_consent)
-from kfs_generator import generate_kfs_for_applicant
-from shap_explain import generate_shap_explanations, explain_applicant
+# Import authentication and database modules
+from auth import init_auth, require_auth, login_user, logout_user, register_user, get_user_stats
+from local_db import init_db, get_applicants, get_single_applicant, insert_applicant, update_applicant_scores
+from model_pipeline import train_and_save_models, predict_default_probability
+import shap_explain
+import kfs_generator
 
-# Page configuration
-st.set_page_config(
-    page_title="Z-Score Credit Assessment",
-    page_icon="🏦",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Initialize session state
-if 'models_loaded' not in st.session_state:
-    st.session_state.models_loaded = False
-if 'data_generated' not in st.session_state:
-    st.session_state.data_generated = False
-if 'offline_mode' not in st.session_state:
-    st.session_state.offline_mode = True
-if 'current_agent' not in st.session_state:
-    st.session_state.current_agent = "AGENT001"
-
-def load_models():
-    """Load trained models using the model_pipeline module"""
-    try:
-        from model_pipeline import load_models as pipeline_load_models
-        lr_model, xgb_model, metrics = pipeline_load_models()
-        return lr_model, xgb_model, metrics
-    except Exception as e:
-        print(f"Error loading models: {e}")
-        return None, None, {}
-
-def calculate_trust_scores(applicant_data):
-    """Calculate trust scores according to Phase 2 Trust Bar Logic specification"""
-    
-    # Behavioral Trust = min(100, (on_time_payment_ratio * 100) - (avg_bill_delay_days * 2))
-    behavioral_trust = min(100, max(0, 
-        (applicant_data.get('on_time_payment_ratio', 0.5) * 100) - 
-        (applicant_data.get('avg_bill_delay_days', 10) * 2)
-    ))
-    
-    # Social Trust = community_endorsements * 20
-    social_trust = min(100, applicant_data.get('community_endorsements', 0) * 20)
-    
-    # Digital Trace = (sim_card_tenure_months / 60 * 50) + (stable_location_ratio * 50)
-    digital_trace = min(100, 
-        (applicant_data.get('sim_card_tenure_months', 0) / 60 * 50) + 
-        (applicant_data.get('stable_location_ratio', 0.5) * 50)
-    )
-    
-    # Total Trust Score = average of the three segments
-    total_trust_score = (behavioral_trust + social_trust + digital_trace) / 3
-    
-    return {
-        'behavioral_trust': behavioral_trust,
-        'social_trust': social_trust,
-        'digital_trace': digital_trace,
-        'total_trust_score': total_trust_score,
-        'graduation_threshold_met': total_trust_score >= 70
+def load_css():
+    """Load custom CSS for professional design."""
+    st.markdown("""
+    <style>
+    /* Global Styles */
+    .main > div {
+        padding: 1rem;
     }
-
-def predict_default_probability(applicant_data, lr_model=None, xgb_model=None):
-    """Predict default probability using trained models"""
-    if lr_model is None or xgb_model is None:
-        from model_pipeline import predict_default_probability as pipeline_predict
-        return pipeline_predict(applicant_data)
     
-    # Legacy compatibility - prepare features
-    features = pd.DataFrame([{
-        'avg_bill_delay_days': applicant_data.get('avg_bill_delay_days', 0),
-        'on_time_payment_ratio': applicant_data.get('on_time_payment_ratio', 0.8),
-        'prev_loans_taken': applicant_data.get('prev_loans_taken', 0),
-        'prev_loans_defaulted': applicant_data.get('prev_loans_defaulted', 0),
-        'community_endorsements': applicant_data.get('community_endorsements', 2),
-        'sim_card_tenure_months': applicant_data.get('sim_card_tenure_months', 12),
-        'recharge_frequency_per_month': applicant_data.get('recharge_frequency_per_month', 10),
-        'stable_location_ratio': applicant_data.get('stable_location_ratio', 0.8)
-    }])
+    /* Hide Streamlit branding */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
     
-    lr_prob = lr_model.predict_proba(features)[0][1]
-    xgb_prob = xgb_model.predict_proba(features)[0][1]
-    
-    return {
-        'score_logistic': lr_prob,
-        'score_xgb': xgb_prob,
-        'average_score': (lr_prob + xgb_prob) / 2
+    /* Sidebar styling */
+    .css-1d391kg {
+        background: linear-gradient(180deg, #1f2937 0%, #374151 100%);
     }
+    
+    /* Custom sidebar */
+    .sidebar-content {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 1.5rem;
+        border-radius: 15px;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 8px 32px rgba(102, 126, 234, 0.2);
+    }
+    
+    .nav-item {
+        padding: 0.8rem 1.2rem;
+        margin: 0.4rem 0;
+        border-radius: 10px;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        background: rgba(255, 255, 255, 0.08);
+        border-left: 4px solid transparent;
+        backdrop-filter: blur(10px);
+    }
+    
+    .nav-item:hover {
+        background: rgba(255, 255, 255, 0.15);
+        border-left: 4px solid #60a5fa;
+        transform: translateX(8px);
+        box-shadow: 0 4px 20px rgba(96, 165, 250, 0.3);
+    }
+    
+    .nav-item.active {
+        background: rgba(255, 255, 255, 0.2);
+        border-left: 4px solid #3b82f6;
+        box-shadow: 0 4px 20px rgba(59, 130, 246, 0.4);
+    }
+    
+    /* Cards */
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 1.8rem;
+        border-radius: 15px;
+        margin: 0.8rem 0;
+        box-shadow: 0 8px 32px rgba(102, 126, 234, 0.15);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    
+    .applicant-card {
+        background: white;
+        padding: 1.5rem;
+        border-radius: 12px;
+        margin: 1rem 0;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+        border-left: 4px solid #3b82f6;
+        transition: all 0.3s ease;
+    }
+    
+    .applicant-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 25px rgba(0, 0, 0, 0.12);
+    }
+    
+    .trust-bar {
+        background: #f1f5f9;
+        border-radius: 12px;
+        height: 24px;
+        overflow: hidden;
+        margin: 12px 0;
+        box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+    
+    .trust-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #ef4444, #f59e0b, #10b981);
+        transition: width 0.8s ease;
+        position: relative;
+    }
+    
+    .trust-fill::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: linear-gradient(45deg, transparent 40%, rgba(255,255,255,0.3) 50%, transparent 60%);
+        animation: shimmer 2s infinite;
+    }
+    
+    @keyframes shimmer {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(100%); }
+    }
+    
+    .obscurity-bar {
+        background: #f1f5f9;
+        border-radius: 12px;
+        height: 24px;
+        overflow: hidden;
+        margin: 12px 0;
+        box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+    
+    .obscurity-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #374151, #6b7280, #9ca3af);
+        transition: width 0.8s ease;
+    }
+    
+    /* Forms */
+    .auth-container {
+        max-width: 420px;
+        margin: 3rem auto;
+        padding: 2.5rem;
+        background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+        border-radius: 20px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+    
+    .form-header {
+        text-align: center;
+        margin-bottom: 2.5rem;
+        color: #1f2937;
+    }
+    
+    .form-header h2 {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-weight: 700;
+    }
+    
+    /* Buttons */
+    .stButton > button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        border-radius: 10px;
+        padding: 0.8rem 2.5rem;
+        font-weight: 600;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
+        background: linear-gradient(135deg, #5a67d8 0%, #6b46c1 100%);
+    }
+    
+    /* Risk category badges */
+    .risk-low {
+        background: linear-gradient(135deg, #10b981, #059669);
+        color: white;
+        padding: 0.4rem 1rem;
+        border-radius: 25px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+    }
+    
+    .risk-medium {
+        background: linear-gradient(135deg, #f59e0b, #d97706);
+        color: white;
+        padding: 0.4rem 1rem;
+        border-radius: 25px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        box-shadow: 0 2px 8px rgba(245, 158, 11, 0.3);
+    }
+    
+    .risk-high {
+        background: linear-gradient(135deg, #ef4444, #dc2626);
+        color: white;
+        padding: 0.4rem 1rem;
+        border-radius: 25px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3);
+    }
+    
+    /* Animations */
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(30px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    
+    @keyframes slideInLeft {
+        from { opacity: 0; transform: translateX(-30px); }
+        to { opacity: 1; transform: translateX(0); }
+    }
+    
+    .fade-in {
+        animation: fadeIn 0.6s ease-out;
+    }
+    
+    .slide-in-left {
+        animation: slideInLeft 0.6s ease-out;
+    }
+    
+    /* Page headers */
+    .page-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-weight: 700;
+        margin-bottom: 2rem;
+    }
+    
+    /* Responsive */
+    @media (max-width: 768px) {
+        .main > div {
+            padding: 0.5rem;
+        }
+        
+        .auth-container {
+            margin: 1rem;
+            padding: 1.5rem;
+        }
+        
+        .metric-card {
+            padding: 1.2rem;
+        }
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-def main():
-    st.title("🏦 Z-Score Credit Assessment Platform")
-    st.markdown("---")
-    
-    # Sidebar navigation
-    st.sidebar.title("Navigation")
-    page = st.sidebar.selectbox("Choose a page", [
-        "📊 Dashboard", 
-        "👤 Applicant Onboarding", 
-        "🎯 Risk Scoring", 
-        "🔍 Explainability",
-        "📄 KFS Generator",
-        "📡 Offline Mode",
-        "🗄️ Database"
-    ])
-    
-    # Offline mode toggle
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🌐 Connection Mode")
-    offline_mode = st.sidebar.toggle("Offline Mode", value=st.session_state.offline_mode)
-    st.session_state.offline_mode = offline_mode
-    
-    if offline_mode:
-        st.sidebar.success("📴 Operating in Offline Mode")
-        # Show sync status
-        sync_status = get_sync_status()
-        st.sidebar.metric("Unsynced Records", sync_status['unsynced_records'])
-    else:
-        st.sidebar.success("🌐 Online Mode")
-        if st.sidebar.button("🔄 Sync Now"):
-            synced_count = sync_data_to_csv()
-            if synced_count > 0:
-                st.sidebar.success(f"✅ Synced {synced_count} records")
-            else:
-                st.sidebar.info("📡 No records to sync")
-    
-    # Initialize database
-    init_db()
-    
-    # Route to appropriate page based on Phase 2 specification
-    if page == "📊 Dashboard":
-        dashboard_page()
-    elif page == "👤 Applicant Onboarding":
-        onboarding_page()
-    elif page == "🎯 Risk Scoring":
-        risk_scoring_page()
-    elif page == "🔍 Explainability":
-        explainability_page()
-    elif page == "📄 KFS Generator":
-        kfs_generator_page()
-    elif page == "📡 Offline Mode":
-        offline_mode_page()
-    elif page == "🗄️ Database":
-        database_page()
-    
-    # Legacy page mappings
-    elif page == "New Applicant Assessment":
-        onboarding_page()
-    elif page == "Applicant Database":
-        database_page()
-    elif page == "Model Management":
-        model_management_page()
-    elif page == "Analytics":
-        analytics_page()
-
-def dashboard_page():
-    st.header("📊 Dashboard")
-    
-    # Check if data and models exist
-    data_exists = os.path.exists('data/applicants.csv')
-    models_exist = os.path.exists('models/lr_model.pkl') and os.path.exists('models/xgb_model.pkl')
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        if data_exists:
-            st.success("✅ Data Available")
-            df = pd.read_csv('data/applicants.csv')
-            st.metric("Total Applicants", len(df))
-        else:
-            st.error("❌ No Data Found")
-            st.metric("Total Applicants", 0)
-    
-    with col2:
-        if models_exist:
-            st.success("✅ Models Trained")
-        else:
-            st.error("❌ Models Not Trained")
-    
-    with col3:
-        db_applicants = get_applicants()
-        st.metric("Database Records", len(db_applicants))
-    
-    st.markdown("---")
-    
-    # Quick actions
-    st.subheader("🚀 Quick Actions")
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        if st.button("Generate Sample Data"):
-            with st.spinner("Generating synthetic data..."):
-                if not os.path.exists('data'):
-                    os.makedirs('data')
-                df = generate_synthetic_data()
-                df.to_csv('data/applicants.csv', index=False)
-                st.success("Sample data generated successfully!")
+def render_sidebar():
+    """Render the navigation sidebar."""
+    with st.sidebar:
+        st.markdown(f"""
+        <div class="sidebar-content">
+            <h2 style="color: white; text-align: center; margin-bottom: 0.5rem; font-weight: 700;">
+                Z-Cred Platform
+            </h2>
+            <div style="color: rgba(255,255,255,0.8); text-align: center; margin-bottom: 2rem; font-size: 0.9rem;">
+                Welcome, {st.session_state.user['name']}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Quick stats
+        stats = get_user_stats(st.session_state.user['user_id'])
+        
+        st.markdown(f"""
+        <div class="metric-card">
+            <div style="font-size: 1.8rem; font-weight: bold; margin-bottom: 0.5rem;">
+                {stats['total_applicants']}
+            </div>
+            <div style="opacity: 0.9; font-size: 0.9rem;">Total Applicants</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown(f"""
+        <div class="metric-card">
+            <div style="font-size: 1.8rem; font-weight: bold; margin-bottom: 0.5rem;">
+                {stats['avg_trust_score']}%
+            </div>
+            <div style="opacity: 0.9; font-size: 0.9rem;">Average Trust Score</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown(f"""
+        <div class="metric-card">
+            <div style="font-size: 1.8rem; font-weight: bold; margin-bottom: 0.5rem;">
+                {stats['graduated_percentage']}%
+            </div>
+            <div style="opacity: 0.9; font-size: 0.9rem;">Trust Graduates</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("---")
+        
+        # Navigation menu - Professional, no emojis
+        nav_options = [
+            ("Dashboard", "home"),
+            ("New Applicant", "add_applicant"),
+            ("Risk Analysis", "applicant_details"),
+            ("AI Insights", "explainability"),
+            ("Credit Report", "kfs"),
+            ("Data Sync", "offline"),
+            ("Settings", "settings")
+        ]
+        
+        for label, key in nav_options:
+            is_active = st.session_state.get('current_page', 'home') == key
+            
+            if st.button(label, key=f"nav_{key}", use_container_width=True):
+                st.session_state.current_page = key
                 st.rerun()
-    
-    with col2:
-        if st.button("Train Models"):
-            if data_exists:
-                with st.spinner("Training models..."):
-                    train_and_save_models()
-                    st.success("Models trained successfully!")
-                    st.rerun()
-            else:
-                st.error("Please generate data first!")
-    
-    with col3:
-        if st.button("Reset System"):
-            # Clear data and models
-            if os.path.exists('data/applicants.csv'):
-                os.remove('data/applicants.csv')
-            if os.path.exists('models/lr_model.pkl'):
-                os.remove('models/lr_model.pkl')
-            if os.path.exists('models/xgb_model.pkl'):
-                os.remove('models/xgb_model.pkl')
-            st.success("System reset successfully!")
+        
+        st.markdown("---")
+        
+        # Logout button
+        if st.button("Sign Out", use_container_width=True, type="secondary"):
+            logout_user()
             st.rerun()
 
-def assessment_page():
-    """Legacy assessment page - redirects to onboarding"""
-    st.info("🔄 This page has been updated. Redirecting to new Onboarding page...")
-    onboarding_page()
-
-def database_page():
-    st.header("🗄️ Applicant Database")
+def auth_page():
+    """Authentication page for login/register."""
+    st.markdown('<div class="auth-container fade-in">', unsafe_allow_html=True)
     
-    # Get all applicants
-    df = get_applicants()
+    # Tab for login/register
+    tab1, tab2 = st.tabs(["Sign In", "Create Account"])
     
-    if len(df) == 0:
-        st.info("No applicants in database yet.")
-        return
-    
-    # Display summary statistics
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Applicants", len(df))
-    with col2:
-        approved = len(df[df['status'] == 'Approved'])
-        st.metric("Approved", approved)
-    with col3:
-        rejected = len(df[df['status'] == 'Rejected'])
-        st.metric("Rejected", rejected)
-    with col4:
-        under_review = len(df[df['status'] == 'Review Required'])
-        st.metric("Under Review", under_review)
-    
-    # Filter options
-    st.subheader("Filters")
-    col1, col2 = st.columns(2)
-    with col1:
-        status_filter = st.selectbox("Filter by Status", ["All", "Approved", "Rejected", "Review Required"])
-    with col2:
-        score_range = st.slider("Trust Score Range", 0.0, 100.0, (0.0, 100.0))
-    
-    # Apply filters
-    filtered_df = df.copy()
-    if status_filter != "All":
-        filtered_df = filtered_df[filtered_df['status'] == status_filter]
-    if 'trust_score' in filtered_df.columns:
-        filtered_df = filtered_df[
-            (filtered_df['trust_score'] >= score_range[0]) & 
-            (filtered_df['trust_score'] <= score_range[1])
-        ]
-    
-    # Display filtered data
-    st.subheader("Applicant Records")
-    st.dataframe(filtered_df, use_container_width=True)
-    
-    # Individual applicant details
-    if len(filtered_df) > 0:
-        st.subheader("Individual Applicant Details")
-        selected_id = st.selectbox("Select Applicant ID", filtered_df['applicant_id'].values)
+    with tab1:
+        st.markdown('<div class="form-header"><h2>Welcome Back</h2><p>Sign in to your Z-Cred account</p></div>', unsafe_allow_html=True)
         
-        if st.button("View Details"):
-            applicant = get_single_applicant(selected_id)
-            if len(applicant) > 0:
-                applicant_data = applicant.iloc[0]
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.write("**Personal Information:**")
-                    st.write(f"Name: {applicant_data.get('applicant_name', 'N/A')}")
-                    st.write(f"Status: {applicant_data.get('status', 'N/A')}")
-                    st.write(f"Consent Given: {'Yes' if applicant_data.get('consent_given', 0) else 'No'}")
-                
-                with col2:
-                    st.write("**Risk Scores:**")
-                    st.write(f"Logistic Regression PD: {applicant_data.get('score_logistic', 0):.2%}")
-                    st.write(f"XGBoost PD: {applicant_data.get('score_xgb', 0):.2%}")
-                    st.write(f"Trust Score: {applicant_data.get('trust_score', 0):.1f}")
-
-def model_management_page():
-    st.header("🤖 Model Management")
-    
-    # Model status
-    lr_exists = os.path.exists('models/lr_model.pkl')
-    xgb_exists = os.path.exists('models/xgb_model.pkl')
-    data_exists = os.path.exists('data/applicants.csv')
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Model Status")
-        st.write(f"Logistic Regression: {'✅ Available' if lr_exists else '❌ Not Found'}")
-        st.write(f"XGBoost: {'✅ Available' if xgb_exists else '❌ Not Found'}")
-        st.write(f"Training Data: {'✅ Available' if data_exists else '❌ Not Found'}")
-    
-    with col2:
-        st.subheader("Quick Actions")
-        
-        if not data_exists:
-            if st.button("Generate Training Data"):
-                with st.spinner("Generating data..."):
-                    if not os.path.exists('data'):
-                        os.makedirs('data')
-                    df = generate_synthetic_data()
-                    df.to_csv('data/applicants.csv', index=False)
-                    st.success("Training data generated!")
-                    st.rerun()
-        
-        if data_exists and st.button("Train Models"):
-            with st.spinner("Training models..."):
-                try:
-                    train_and_save_models()
-                    st.success("Models trained successfully!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error training models: {str(e)}")
-        
-        if lr_exists and xgb_exists and st.button("Retrain Models"):
-            with st.spinner("Retraining models..."):
-                try:
-                    train_and_save_models()
-                    st.success("Models retrained successfully!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error retraining models: {str(e)}")
-    
-    # Training data overview
-    if data_exists:
-        st.subheader("Training Data Overview")
-        df = pd.read_csv('data/applicants.csv')
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Records", len(df))
-        with col2:
-            default_rate = df['default'].mean()
-            st.metric("Default Rate", f"{default_rate:.2%}")
-        with col3:
-            missing_rate = df.isnull().sum().sum() / (len(df) * len(df.columns))
-            st.metric("Missing Data Rate", f"{missing_rate:.2%}")
-        
-        # Feature distribution
-        st.subheader("Feature Distributions")
-        feature = st.selectbox("Select Feature", df.columns[1:-1])  # Exclude ID and target
-        
-        fig = px.histogram(df, x=feature, color='default', title=f"Distribution of {feature}")
-        st.plotly_chart(fig, use_container_width=True)
-
-def analytics_page():
-    st.header("📈 Analytics")
-    
-    # Get database data
-    df = get_applicants()
-    
-    if len(df) == 0:
-        st.info("No data available for analytics. Please assess some applicants first.")
-        return
-    
-    # Overview metrics
-    st.subheader("Overview")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("Total Assessments", len(df))
-    with col2:
-        if 'status' in df.columns:
-            approval_rate = len(df[df['status'] == 'Approved']) / len(df)
-            st.metric("Approval Rate", f"{approval_rate:.1%}")
-    with col3:
-        if 'score_logistic' in df.columns:
-            avg_pd = df['score_logistic'].mean()
-            st.metric("Avg. Default Probability", f"{avg_pd:.2%}")
-    with col4:
-        if 'trust_score' in df.columns:
-            avg_trust = df['trust_score'].mean()
-            st.metric("Avg. Trust Score", f"{avg_trust:.1f}")
-    
-    # Status distribution
-    if 'status' in df.columns:
-        st.subheader("Application Status Distribution")
-        status_counts = df['status'].value_counts()
-        fig = px.pie(values=status_counts.values, names=status_counts.index, title="Status Distribution")
-        st.plotly_chart(fig, use_container_width=True)
-    
-    # Score distributions
-    if 'score_logistic' in df.columns and 'score_xgb' in df.columns:
-        st.subheader("Risk Score Distributions")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            fig = px.histogram(df, x='score_logistic', title="Logistic Regression Scores")
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            fig = px.histogram(df, x='score_xgb', title="XGBoost Scores")
-            st.plotly_chart(fig, use_container_width=True)
-    
-    # Trust score breakdown
-    trust_cols = ['behavioral_trust', 'social_trust', 'digital_trace']
-    available_trust_cols = [col for col in trust_cols if col in df.columns]
-    
-    if available_trust_cols:
-        st.subheader("Trust Score Analysis")
-        trust_data = df[available_trust_cols].mean()
-        
-        fig = px.bar(x=trust_data.index, y=trust_data.values, title="Average Trust Scores by Component")
-        st.plotly_chart(fig, use_container_width=True)
-
-if __name__ == "__main__":
-    main()
-
-# === NEW PHASE 2 PAGES ===
-
-def onboarding_page():
-    """Page 1 - Applicant Onboarding (Phase 2 spec)"""
-    st.header("👤 Applicant Onboarding")
-    st.markdown("*Offline-first onboarding for field agents*")
-    
-    # Agent information
-    col1, col2 = st.columns(2)
-    with col1:
-        agent_id = st.text_input("Agent ID", value=st.session_state.current_agent)
-        st.session_state.current_agent = agent_id
-    with col2:
-        location = st.text_input("Location", placeholder="Assessment location")
-    
-    # Consent notice (multilingual placeholder)
-    st.subheader("📋 Data Processing Consent")
-    st.info("**English:** I consent to the processing of my data for credit assessment.\n"
-           "**हिंदी:** मैं क्रेडिट मूल्यांकन के लिए अपने डेटा के प्रसंस्करण की सहमति देता हूं।")
-    
-    # Onboarding form
-    with st.form("onboarding_form"):
-        st.subheader("Applicant Information")
-        
-        # Basic information
-        col1, col2 = st.columns(2)
-        with col1:
-            name = st.text_input("Full Name*", placeholder="Enter full name as per ID")
-            phone = st.text_input("Mobile Number", placeholder="+91XXXXXXXXXX")
-            consent = st.checkbox("I agree to data processing for credit assessment", value=False)
-        
-        with col2:
-            id_type = st.selectbox("ID Type", ["Aadhaar", "PAN", "Voter ID", "Driving License"])
-            id_number = st.text_input("ID Number", placeholder="Enter ID number")
+        with st.form("login_form"):
+            email = st.text_input("Email Address", placeholder="Enter your email")
+            password = st.text_input("Password", type="password", placeholder="Enter your password")
+            submit = st.form_submit_button("Sign In", use_container_width=True)
             
-        # Alternative data fields (as per dataset schema)
-        st.subheader("📊 Alternative Data Assessment")
+            if submit:
+                if email and password:
+                    if login_user(email, password):
+                        st.success("Login successful!")
+                        st.session_state.current_page = 'home'
+                        st.rerun()
+                    else:
+                        st.error("Invalid email or password")
+                else:
+                    st.warning("Please fill in all fields")
+    
+    with tab2:
+        st.markdown('<div class="form-header"><h2>Join Z-Cred</h2><p>Create your account to get started</p></div>', unsafe_allow_html=True)
         
-        col1, col2 = st.columns(2)
+        with st.form("register_form"):
+            name = st.text_input("Full Name", placeholder="Enter your full name")
+            email = st.text_input("Email Address", placeholder="Enter your email")
+            phone = st.text_input("Phone Number (optional)", placeholder="Enter your phone number")
+            password = st.text_input("Password", type="password", placeholder="Create a password")
+            confirm_password = st.text_input("Confirm Password", type="password", placeholder="Confirm your password")
+            
+            terms = st.checkbox("I agree to the Terms of Service and Privacy Policy")
+            submit = st.form_submit_button("Create Account", use_container_width=True)
+            
+            if submit:
+                if name and email and password and confirm_password:
+                    if not terms:
+                        st.error("Please accept the Terms of Service")
+                    elif password != confirm_password:
+                        st.error("Passwords do not match")
+                    elif len(password) < 6:
+                        st.error("Password must be at least 6 characters")
+                    else:
+                        success, result = register_user(name, email, phone, password)
+                        if success:
+                            st.success("Account created successfully! You can now sign in.")
+                        else:
+                            st.error(f"Registration failed: {result}")
+                else:
+                    st.warning("Please fill in all required fields")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def home_page():
+    """User dashboard/home page."""
+    st.markdown('<div class="fade-in">', unsafe_allow_html=True)
+    
+    st.markdown('<h1 class="page-header">Risk Assessment Dashboard</h1>', unsafe_allow_html=True)
+    st.markdown(f"**Good day, {st.session_state.user['name']}!** Here's your portfolio overview.")
+    st.markdown("---")
+    
+    # Get user's applicants
+    user_applicants = get_applicants(user_id=st.session_state.user['user_id'])
+    
+    if len(user_applicants) == 0:
+        st.markdown("""
+        <div style="text-align: center; padding: 3rem; background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%); 
+                    border-radius: 15px; margin: 2rem 0;">
+            <h3>Ready to Begin Risk Assessment?</h3>
+            <p style="color: #64748b; margin: 1rem 0;">Start building your applicant portfolio by adding your first assessment.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        if st.button("Add First Applicant", type="primary", use_container_width=True):
+            st.session_state.current_page = 'add_applicant'
+            st.rerun()
+    else:
+        # Portfolio overview
+        col1, col2, col3, col4 = st.columns(4)
+        
         with col1:
-            avg_bill_delay = st.number_input("Average Bill Payment Delay (days)", 
-                                           min_value=0, max_value=30, value=5,
-                                           help="How many days late are bill payments on average?")
-            payment_ratio = st.slider("On-time Payment Ratio", 0.0, 1.0, 0.8, 0.01,
-                                    help="What percentage of bills are paid on time?")
-            prev_loans = st.number_input("Previous Loans Taken", min_value=0, max_value=10, value=1)
-            prev_defaults = st.number_input("Previous Defaults", min_value=0, max_value=5, value=0)
+            st.metric("Total Assessments", len(user_applicants))
+        with col2:
+            avg_trust = user_applicants['total_trust_score'].mean()
+            st.metric("Avg Trust Score", f"{avg_trust:.1f}%" if not pd.isna(avg_trust) else "N/A")
+        with col3:
+            high_risk = len(user_applicants[user_applicants['risk_category'] == 'High'])
+            st.metric("High Risk", high_risk)
+        with col4:
+            approved = len(user_applicants[user_applicants['final_status'] == 'Approved'])
+            st.metric("Approved", approved)
+        
+        st.markdown("---")
+        
+        # Display applicants in professional cards
+        st.subheader("Your Applicants Portfolio")
+        
+        for idx, row in user_applicants.iterrows():
+            st.markdown(f"""
+            <div class="applicant-card slide-in-left">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <h4 style="margin: 0; color: #1f2937;">{row['applicant_name']}</h4>
+                        <small style="color: #6b7280;">ID: {row['applicant_id']} • Added: {pd.to_datetime(row['created_timestamp']).strftime('%Y-%m-%d')}</small>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+            
+            with col1:
+                if pd.notna(row['total_trust_score']):
+                    trust_score = row['total_trust_score']
+                    st.markdown(f"""
+                    <div class="trust-bar">
+                        <div class="trust-fill" style="width: {trust_score}%"></div>
+                    </div>
+                    <small>Trust Score: {trust_score:.1f}%</small>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.write("Processing...")
+            
+            with col2:
+                if pd.notna(row['risk_category']):
+                    risk_class = f"risk-{row['risk_category'].lower()}"
+                    st.markdown(f'<span class="{risk_class}">{row["risk_category"]} Risk</span>', 
+                              unsafe_allow_html=True)
+            
+            with col3:
+                if st.button("View", key=f"view_{row['applicant_id']}"):
+                    st.session_state.selected_applicant = row['applicant_id']
+                    st.session_state.current_page = 'applicant_details'
+                    st.rerun()
+            
+            with col4:
+                if pd.notna(row['total_trust_score']):
+                    if st.button("Report", key=f"kfs_{row['applicant_id']}"):
+                        st.session_state.selected_applicant = row['applicant_id']
+                        st.session_state.current_page = 'kfs'
+                        st.rerun()
+        
+        # Add new applicant button
+        st.markdown("---")
+        if st.button("Add New Applicant", type="primary", use_container_width=True):
+            st.session_state.current_page = 'add_applicant'
+            st.rerun()
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def add_applicant_page():
+    """Add new applicant page."""
+    st.markdown('<div class="fade-in">', unsafe_allow_html=True)
+    
+    st.markdown('<h1 class="page-header">New Applicant Assessment</h1>', unsafe_allow_html=True)
+    st.markdown("Complete the assessment form to generate risk scores and trust analysis.")
+    st.markdown("---")
+    
+    with st.form("add_applicant_form"):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Personal Information")
+            name = st.text_input("Full Name*", placeholder="Enter applicant's full name")
+            
+            st.subheader("Financial Behavior")
+            avg_bill_delay = st.number_input("Average Bill Delay (days)", min_value=0.0, value=0.0, step=0.1,
+                                           help="Average number of days bills are paid late")
+            on_time_ratio = st.slider("On-time Payment Ratio", 0.0, 1.0, 0.8, 0.01,
+                                    help="Percentage of bills paid on time")
+            prev_loans = st.number_input("Previous Loans Taken", min_value=0, value=0,
+                                       help="Total number of previous loans")
+            prev_defaults = st.number_input("Previous Loan Defaults", min_value=0, value=0,
+                                         help="Number of previous loan defaults")
         
         with col2:
-            endorsements = st.number_input("Community Endorsements", min_value=0, max_value=5, value=2,
-                                         help="Number of SHG/NGO endorsements")
-            sim_tenure = st.number_input("SIM Card Tenure (months)", min_value=0, max_value=60, value=24)
-            recharge_freq = st.number_input("Monthly Recharges", min_value=0, max_value=20, value=8)
-            location_stability = st.slider("Location Stability Ratio", 0.0, 1.0, 0.8, 0.01,
-                                          help="Percentage of time at stable location")
+            st.subheader("Social & Digital Profile")
+            community_endorsements = st.number_input("Community Endorsements", min_value=0, value=0,
+                                                    help="Number of community endorsements or references")
+            sim_tenure = st.number_input("SIM Card Tenure (months)", min_value=0, value=12,
+                                       help="How long has the applicant had their current SIM card")
+            recharge_freq = st.number_input("Monthly Recharge Frequency", min_value=0, value=4,
+                                          help="Number of mobile recharges per month")
+            location_stability = st.slider("Location Stability Ratio", 0.0, 1.0, 0.7, 0.01,
+                                         help="Consistency of location patterns")
+            
+            st.subheader("Additional Notes")
+            notes = st.text_area("Assessment Notes", placeholder="Any additional notes about the applicant")
         
-        notes = st.text_area("Additional Notes", placeholder="Any additional observations...")
+        # Consent section
+        st.markdown("---")
+        st.subheader("Data Privacy & Consent")
+        consent = st.checkbox("I confirm that the applicant has provided informed consent for data processing, risk assessment, and credit evaluation in accordance with data protection regulations.*")
         
-        submitted = st.form_submit_button("💾 Save Applicant Data", type="primary")
+        # Submit button
+        submit = st.form_submit_button("Generate Risk Assessment", type="primary", use_container_width=True)
         
-        if submitted:
+        if submit:
             if not name:
-                st.error("❌ Please enter applicant name")
+                st.error("Applicant name is required")
             elif not consent:
-                st.error("❌ Consent is required for data processing")
+                st.error("Applicant consent must be confirmed to proceed")
             else:
                 # Prepare applicant data
                 applicant_data = {
                     'name': name,
-                    'phone': phone,
-                    'id_type': id_type,
-                    'id_number': id_number,
                     'avg_bill_delay_days': avg_bill_delay,
-                    'on_time_payment_ratio': payment_ratio,
+                    'on_time_payment_ratio': on_time_ratio,
                     'prev_loans_taken': prev_loans,
                     'prev_loans_defaulted': prev_defaults,
-                    'community_endorsements': endorsements,
+                    'community_endorsements': community_endorsements,
                     'sim_card_tenure_months': sim_tenure,
                     'recharge_frequency_per_month': recharge_freq,
                     'stable_location_ratio': location_stability,
@@ -521,502 +550,228 @@ def onboarding_page():
                     'notes': notes
                 }
                 
-                # Insert into database
-                applicant_id = insert_applicant(applicant_data, agent_id=agent_id, location=location)
-                
-                st.success(f"✅ Applicant {name} onboarded successfully! ID: {applicant_id}")
-                st.info("📴 Data saved locally. Will sync when online.")
-                
-                # Show what's next
-                st.markdown("### Next Steps:")
-                st.markdown("1. 🎯 Go to **Risk Scoring** to assess this applicant")
-                st.markdown("2. 🔍 View **Explainability** for model insights")
-                st.markdown("3. 📄 Generate **KFS** if approved")
+                # Insert applicant
+                try:
+                    applicant_id = insert_applicant(
+                        applicant_data, 
+                        created_by=st.session_state.user['user_id']
+                    )
+                    
+                    # Calculate risk scores
+                    with st.spinner("Calculating risk scores and trust analysis..."):
+                        try:
+                            # Prepare data for prediction
+                            input_data = pd.DataFrame([{
+                                'avg_bill_delay_days': avg_bill_delay,
+                                'on_time_payment_ratio': on_time_ratio,
+                                'prev_loans_taken': prev_loans,
+                                'prev_loans_defaulted': prev_defaults,
+                                'community_endorsements': community_endorsements,
+                                'sim_card_tenure_months': sim_tenure,
+                                'recharge_frequency_per_month': recharge_freq,
+                                'stable_location_ratio': location_stability
+                            }])
+                            
+                            # Calculate scores
+                            scores = predict_default_probability(input_data.iloc[0])
+                            
+                            # Calculate trust components
+                            behavioral_trust = (on_time_ratio * 40) + ((1 - min(avg_bill_delay/30, 1)) * 20)
+                            social_trust = min(community_endorsements * 10, 50) + (location_stability * 30)
+                            digital_trace = min(sim_tenure / 24 * 30, 30) + min(recharge_freq / 10 * 20, 20)
+                            total_trust = behavioral_trust + social_trust + digital_trace
+                            
+                            scores_data = {
+                                'score_logistic': scores.get('score_logistic', 0),
+                                'score_xgb': scores.get('score_xgb', 0),
+                                'behavioral_trust': behavioral_trust,
+                                'social_trust': social_trust,
+                                'digital_trace': digital_trace,
+                                'total_trust_score': total_trust
+                            }
+                            
+                            # Update applicant with scores
+                            update_applicant_scores(applicant_id, scores_data)
+                            
+                            st.success(f"Risk assessment completed for {name}!")
+                            st.balloons()
+                            st.session_state.selected_applicant = applicant_id
+                            st.session_state.current_page = 'applicant_details'
+                            st.rerun()
+                            
+                        except Exception as e:
+                            st.error(f"Error calculating scores: {str(e)}")
+                            
+                except Exception as e:
+                    st.error(f"Error adding applicant: {str(e)}")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
 
-def risk_scoring_page():
-    """Page 2 - Risk Scoring (Phase 2 spec)"""
-    st.header("🎯 Risk Scoring")
-    st.markdown("*Select applicant and display PD from both models*")
+def applicant_details_page():
+    """Applicant details page."""
+    st.markdown('<div class="fade-in">', unsafe_allow_html=True)
     
-    # Get applicants
-    applicants_df = get_applicants()
-    
-    if len(applicants_df) == 0:
-        st.warning("⚠️ No applicants found. Please onboard applicants first.")
+    selected_id = st.session_state.get('selected_applicant')
+    if not selected_id:
+        st.warning("No applicant selected. Please select an applicant from the dashboard.")
+        if st.button("Go to Dashboard"):
+            st.session_state.current_page = 'home'
+            st.rerun()
         return
     
-    # Applicant selection
-    unprocessed_applicants = applicants_df[applicants_df['data_processed'] != 1]
-    
-    if len(unprocessed_applicants) == 0:
-        st.info("ℹ️ All applicants have been processed.")
-        processed_applicants = applicants_df[applicants_df['data_processed'] == 1]
-        selected_applicant = st.selectbox("View Processed Applicant", 
-                                        processed_applicants['applicant_name'].values)
-        applicant_data = processed_applicants[processed_applicants['applicant_name'] == selected_applicant].iloc[0]
-        show_existing_scores = True
-    else:
-        selected_applicant = st.selectbox("Select Applicant for Risk Assessment", 
-                                        unprocessed_applicants['applicant_name'].values)
-        applicant_data = unprocessed_applicants[unprocessed_applicants['applicant_name'] == selected_applicant].iloc[0]
-        show_existing_scores = False
-    
-    # Load models
-    lr_model, xgb_model, metrics = load_models()
-    
-    if lr_model is None:
-        st.error("❌ Models not found. Please train models first.")
-        if st.button("🚀 Train Models Now"):
-            with st.spinner("Training models..."):
-                try:
-                    train_and_save_models()
-                    st.success("✅ Models trained successfully!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Error training models: {e}")
+    # Get applicant data
+    applicant_data = get_single_applicant(selected_id)
+    if len(applicant_data) == 0:
+        st.error("Applicant not found.")
         return
     
-    # Display applicant information
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("👤 Applicant Details")
-        st.write(f"**Name:** {applicant_data['applicant_name']}")
-        st.write(f"**Agent:** {applicant_data.get('agent_id', 'Unknown')}")
-        st.write(f"**Location:** {applicant_data.get('location', 'Not specified')}")
-        st.write(f"**Consent:** {'✅ Given' if applicant_data.get('consent_given', 0) else '❌ Not given'}")
+    applicant = applicant_data.iloc[0]
     
-    with col2:
-        st.subheader("📊 Input Features")
-        st.write(f"**Bill Delay:** {applicant_data.get('avg_bill_delay_days', 'N/A')} days")
-        st.write(f"**Payment Ratio:** {applicant_data.get('on_time_payment_ratio', 'N/A')}")
-        st.write(f"**Previous Loans:** {applicant_data.get('prev_loans_taken', 'N/A')}")
-        st.write(f"**Previous Defaults:** {applicant_data.get('prev_loans_defaulted', 'N/A')}")
-        st.write(f"**Community Endorsements:** {applicant_data.get('community_endorsements', 'N/A')}")
-    
-    if show_existing_scores:
-        # Show existing scores
-        st.markdown("---")
-        st.subheader("📈 Risk Assessment Results")
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            lr_score = applicant_data.get('score_logistic', 0)
-            st.metric("Logistic Regression PD", f"{lr_score:.2%}")
-        with col2:
-            xgb_score = applicant_data.get('score_xgb', 0)  
-            st.metric("XGBoost PD", f"{xgb_score:.2%}")
-        with col3:
-            avg_score = applicant_data.get('average_score', (lr_score + xgb_score) / 2)
-            risk_category = applicant_data.get('risk_category', 'Unknown')
-            st.metric("Risk Category", risk_category)
-        
-        # Trust Bar visualization
-        if applicant_data.get('total_trust_score') is not None:
-            st.subheader("🏆 Trust Bar")
-            
-            behavioral = applicant_data.get('behavioral_trust', 0)
-            social = applicant_data.get('social_trust', 0)
-            digital = applicant_data.get('digital_trace', 0)
-            total = applicant_data.get('total_trust_score', 0)
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Behavioral Trust", f"{behavioral:.1f}/100")
-            with col2:
-                st.metric("Social Trust", f"{social:.1f}/100")
-            with col3:
-                st.metric("Digital Trace", f"{digital:.1f}/100")
-            with col4:
-                graduation = "🎓 Graduated" if total >= 70 else "📚 In Progress"
-                st.metric("Total Score", f"{total:.1f}/100", delta=graduation)
-            
-            # Trust bar visualization
-            trust_data = pd.DataFrame({
-                'Component': ['Behavioral Trust', 'Social Trust', 'Digital Trace'],
-                'Score': [behavioral, social, digital],
-                'Target': [70, 70, 70]  # Graduation threshold
-            })
-            
-            fig = px.bar(trust_data, x='Component', y='Score', 
-                        title="Trust Score Components (Graduation Threshold: 70%)")
-            fig.add_hline(y=70, line_dash="dash", line_color="red", 
-                         annotation_text="Graduation Threshold")
-            st.plotly_chart(fig, use_container_width=True)
-    
-    else:
-        # Process new applicant
-        if st.button("🎯 Assess Risk Now", type="primary"):
-            with st.spinner("Running risk assessment..."):
-                # Prepare data for prediction
-                pred_data = {
-                    'avg_bill_delay_days': applicant_data.get('avg_bill_delay_days'),
-                    'on_time_payment_ratio': applicant_data.get('on_time_payment_ratio'),
-                    'prev_loans_taken': applicant_data.get('prev_loans_taken'),
-                    'prev_loans_defaulted': applicant_data.get('prev_loans_defaulted'),
-                    'community_endorsements': applicant_data.get('community_endorsements'),
-                    'sim_card_tenure_months': applicant_data.get('sim_card_tenure_months'),
-                    'recharge_frequency_per_month': applicant_data.get('recharge_frequency_per_month'),
-                    'stable_location_ratio': applicant_data.get('stable_location_ratio')
-                }
-                
-                # Get predictions
-                prediction_results = predict_default_probability(pred_data)
-                trust_scores = calculate_trust_scores(pred_data)
-                
-                # Determine risk category and status
-                avg_score = prediction_results.get('average_score', 0)
-                if avg_score < 0.3:
-                    risk_category = 'Low'
-                    final_status = 'Approved'
-                elif avg_score < 0.7:
-                    risk_category = 'Medium'
-                    final_status = 'Review Required'
-                else:
-                    risk_category = 'High'
-                    final_status = 'Rejected'
-                
-                # Update database
-                scores_data = {
-                    'score_logistic': prediction_results.get('score_logistic'),
-                    'score_xgb': prediction_results.get('score_xgb'),
-                    'average_score': avg_score,
-                    'behavioral_trust': trust_scores['behavioral_trust'],
-                    'social_trust': trust_scores['social_trust'],
-                    'digital_trace': trust_scores['digital_trace'],
-                    'total_trust_score': trust_scores['total_trust_score']
-                }
-                
-                update_applicant_scores(int(applicant_data['applicant_id']), scores_data)
-                
-                # Log scoring consent
-                log_consent(int(applicant_data['applicant_id']), 'scoring', True, 
-                           'Risk scoring completed with model predictions')
-                
-                st.success(f"✅ Risk assessment completed! Status: {final_status}")
-                st.rerun()
-
-def explainability_page():
-    """Page 3 - Explainability (Phase 2 spec)"""
-    st.header("🔍 Explainability")
-    st.markdown("*Global and local SHAP explanations for transparency*")
-    
-    # Check if explanations exist
-    explanations_exist = (os.path.exists('explanations/global_explanations.json') and 
-                         os.path.exists('explanations/local_explanations.json'))
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🌍 Generate Global SHAP"):
-            with st.spinner("Generating global explanations..."):
-                try:
-                    global_exp, local_exp = generate_shap_explanations()
-                    st.success("✅ Global SHAP explanations generated!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Error generating explanations: {e}")
-    
-    with col2:
-        if explanations_exist:
-            st.success("✅ SHAP explanations available")
-        else:
-            st.warning("⚠️ No explanations found")
-    
-    if explanations_exist:
-        # Load explanations
-        import json
-        with open('explanations/global_explanations.json', 'r') as f:
-            global_explanations = json.load(f)
-        
-        # Global explanations
-        st.subheader("🌍 Global Feature Importance")
-        
-        model_choice = st.selectbox("Select Model", ["logistic_regression", "xgboost"])
-        
-        if model_choice in global_explanations:
-            model_data = global_explanations[model_choice]
-            
-            # Create feature importance chart
-            importance_df = pd.DataFrame({
-                'Feature': model_data['features'],
-                'Importance': model_data['importance']
-            }).sort_values('Importance', ascending=True)
-            
-            fig = px.bar(importance_df, x='Importance', y='Feature', orientation='h',
-                        title=f"Global Feature Importance - {model_choice.replace('_', ' ').title()}")
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Local explanations for specific applicant
-        st.subheader("👤 Local Explanations")
-        
-        # Get processed applicants
-        applicants_df = get_applicants()
-        processed_applicants = applicants_df[applicants_df['data_processed'] == 1]
-        
-        if len(processed_applicants) > 0:
-            selected_applicant = st.selectbox("Select Applicant", 
-                                            processed_applicants['applicant_name'].values)
-            
-            if st.button("🔍 Generate Local SHAP"):
-                applicant_row = processed_applicants[processed_applicants['applicant_name'] == selected_applicant].iloc[0]
-                
-                # Prepare applicant data
-                applicant_features = {
-                    'avg_bill_delay_days': applicant_row.get('avg_bill_delay_days'),
-                    'on_time_payment_ratio': applicant_row.get('on_time_payment_ratio'),
-                    'prev_loans_taken': applicant_row.get('prev_loans_taken'),
-                    'prev_loans_defaulted': applicant_row.get('prev_loans_defaulted'),
-                    'community_endorsements': applicant_row.get('community_endorsements'),
-                    'sim_card_tenure_months': applicant_row.get('sim_card_tenure_months'),
-                    'recharge_frequency_per_month': applicant_row.get('recharge_frequency_per_month'),
-                    'stable_location_ratio': applicant_row.get('stable_location_ratio')
-                }
-                
-                try:
-                    explanation = explain_applicant(applicant_features, model_type=model_choice)
-                    
-                    # Display prediction
-                    st.metric("Prediction Probability", f"{explanation['prediction_probability']:.2%}")
-                    
-                    # Display top factors
-                    st.subheader("🎯 Top Contributing Factors")
-                    for i, (factor, impact) in enumerate(explanation['top_factors'][:5]):
-                        direction = "📈 Increases" if impact > 0 else "📉 Decreases"
-                        st.write(f"{i+1}. **{factor}**: {direction} risk by {abs(impact):.3f}")
-                    
-                except Exception as e:
-                    st.error(f"❌ Error generating local explanation: {e}")
-        else:
-            st.info("ℹ️ No processed applicants found for local explanations.")
-
-def kfs_generator_page():
-    """Page 4 - KFS Generator (Phase 2 spec)"""
-    st.header("📄 KFS Generator")
-    st.markdown("*Generate Key Fact Statement with PD score, loan terms, and top feature impacts*")
-    
-    # Get approved applicants
-    applicants_df = get_applicants()
-    approved_applicants = applicants_df[
-        (applicants_df['final_status'] == 'Approved') | 
-        (applicants_df['risk_category'] == 'Low')
-    ]
-    
-    if len(approved_applicants) == 0:
-        st.warning("⚠️ No approved applicants found for KFS generation.")
-        st.info("💡 Tip: Assess applicants in the Risk Scoring page first.")
-        return
-    
-    # Applicant selection
-    selected_applicant = st.selectbox("Select Approved Applicant", 
-                                    approved_applicants['applicant_name'].values)
-    
-    applicant_data = approved_applicants[approved_applicants['applicant_name'] == selected_applicant].iloc[0]
-    
-    # Display applicant summary
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("👤 Applicant Summary")
-        st.write(f"**Name:** {applicant_data['applicant_name']}")
-        st.write(f"**Risk Category:** {applicant_data.get('risk_category', 'N/A')}")
-        st.write(f"**Status:** {applicant_data.get('final_status', 'N/A')}")
-        
-    with col2:
-        st.subheader("📊 Risk Scores")
-        lr_score = applicant_data.get('score_logistic', 0)
-        xgb_score = applicant_data.get('score_xgb', 0)
-        avg_score = (lr_score + xgb_score) / 2
-        st.write(f"**Logistic Regression PD:** {lr_score:.2%}")
-        st.write(f"**XGBoost PD:** {xgb_score:.2%}")
-        st.write(f"**Average PD:** {avg_score:.2%}")
-    
-    # Trust score display
-    if applicant_data.get('total_trust_score') is not None:
-        st.subheader("🏆 Trust Score")
-        total_trust = applicant_data.get('total_trust_score', 0)
-        graduation_status = "🎓 Graduated (≥70%)" if total_trust >= 70 else "📚 In Progress (<70%)"
-        st.write(f"**Total Trust Score:** {total_trust:.1f}/100 - {graduation_status}")
-    
-    # KFS generation
+    st.markdown(f'<h1 class="page-header">Risk Analysis: {applicant["applicant_name"]}</h1>', unsafe_allow_html=True)
     st.markdown("---")
-    st.subheader("📄 Generate KFS Document")
     
-    col1, col2 = st.columns(2)
+    # Basic info cards
+    col1, col2, col3, col4 = st.columns(4)
+    
     with col1:
-        include_trust_scores = st.checkbox("Include Trust Score breakdown", value=True)
-        include_compliance = st.checkbox("Include full compliance section", value=True)
-    
+        st.metric("Applicant ID", applicant['applicant_id'])
     with col2:
-        kfs_language = st.selectbox("Document Language", ["English", "Hindi (हिंदी)", "Bilingual"])
-        document_type = st.selectbox("Document Type", ["Standard KFS", "Detailed Assessment"])
+        if pd.notna(applicant['risk_category']):
+            risk_class = f"risk-{applicant['risk_category'].lower()}"
+            st.markdown(f'**Risk Level:** <span class="{risk_class}">{applicant["risk_category"]}</span>', 
+                      unsafe_allow_html=True)
+    with col3:
+        st.metric("Status", applicant.get('final_status', 'Pending'))
+    with col4:
+        if pd.notna(applicant['created_timestamp']):
+            created_date = pd.to_datetime(applicant['created_timestamp']).strftime('%Y-%m-%d')
+            st.metric("Assessed", created_date)
     
-    if st.button("📄 Generate KFS Document", type="primary"):
-        with st.spinner("Generating KFS document..."):
-            try:
-                # Prepare data for KFS generation
-                prediction_results = {
-                    'score_logistic': lr_score,
-                    'score_xgb': xgb_score,
-                    'average_score': avg_score
-                }
-                
-                # Prepare applicant data
-                kfs_applicant_data = {
-                    'name': applicant_data['applicant_name'],
-                    'avg_bill_delay_days': applicant_data.get('avg_bill_delay_days'),
-                    'on_time_payment_ratio': applicant_data.get('on_time_payment_ratio'),
-                    'prev_loans_taken': applicant_data.get('prev_loans_taken'),
-                    'prev_loans_defaulted': applicant_data.get('prev_loans_defaulted'),
-                    'community_endorsements': applicant_data.get('community_endorsements'),
-                    'sim_card_tenure_months': applicant_data.get('sim_card_tenure_months'),
-                    'recharge_frequency_per_month': applicant_data.get('recharge_frequency_per_month'),
-                    'stable_location_ratio': applicant_data.get('stable_location_ratio')
-                }
-                
-                # Trust scores (if requested)
-                trust_scores = None
-                if include_trust_scores:
-                    trust_scores = {
-                        'behavioral_trust': applicant_data.get('behavioral_trust', 0),
-                        'social_trust': applicant_data.get('social_trust', 0),
-                        'digital_trace': applicant_data.get('digital_trace', 0),
-                        'total_trust_score': applicant_data.get('total_trust_score', 0)
-                    }
-                
-                # Generate KFS
-                kfs_path = generate_kfs_for_applicant(kfs_applicant_data, prediction_results, trust_scores)
-                
-                if kfs_path:
-                    st.success(f"✅ KFS document generated successfully!")
-                    st.info(f"📄 Document saved as: {kfs_path}")
-                    
-                    # Log KFS generation
-                    log_consent(int(applicant_data['applicant_id']), 'kfs_generation', True, 
-                               f'KFS document generated: {kfs_path}')
-                    
-                    # Display next steps
-                    st.markdown("### 📋 Next Steps:")
-                    st.markdown("1. 📧 Share KFS with applicant")
-                    st.markdown("2. ⏰ Allow 24-hour cooling-off period")
-                    st.markdown("3. 📝 Collect final acceptance/rejection")
-                    st.markdown("4. 💰 Process loan if accepted")
-                    
-                else:
-                    st.error("❌ Failed to generate KFS document")
-                    
-            except Exception as e:
-                st.error(f"❌ Error generating KFS: {e}")
-
-def offline_mode_page():
-    """Page 5 - Offline Mode (Phase 2 spec)"""
-    st.header("📡 Offline Mode")
-    st.markdown("*Toggle offline/online mode and sync data*")
+    # Trust and Obscurity Analysis
+    if pd.notna(applicant['total_trust_score']):
+        st.markdown("---")
+        st.subheader("Trust & Risk Analysis")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            trust_score = applicant['total_trust_score']
+            st.markdown(f"""
+            <div style="background: white; padding: 1.5rem; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+                <h4 style="color: #10b981; margin-bottom: 1rem;">Trust Score: {trust_score:.1f}%</h4>
+                <div class="trust-bar">
+                    <div class="trust-fill" style="width: {trust_score}%"></div>
+                </div>
+                <small style="color: #6b7280;">Higher scores indicate greater trustworthiness</small>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Trust components breakdown
+            st.markdown("**Trust Components:**")
+            if pd.notna(applicant['behavioral_trust']):
+                st.metric("Behavioral Trust", f"{applicant['behavioral_trust']:.1f}%")
+            if pd.notna(applicant['social_trust']):
+                st.metric("Social Trust", f"{applicant['social_trust']:.1f}%")
+            if pd.notna(applicant['digital_trace']):
+                st.metric("Digital Trust", f"{applicant['digital_trace']:.1f}%")
+        
+        with col2:
+            obscurity_score = 100 - trust_score
+            st.markdown(f"""
+            <div style="background: white; padding: 1.5rem; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+                <h4 style="color: #6b7280; margin-bottom: 1rem;">Obscurity Level: {obscurity_score:.1f}%</h4>
+                <div class="obscurity-bar">
+                    <div class="obscurity-fill" style="width: {obscurity_score}%"></div>
+                </div>
+                <small style="color: #6b7280;">Lower scores indicate better data visibility</small>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Risk scores breakdown
+            st.markdown("**Risk Scores:**")
+            if pd.notna(applicant['score_logistic']):
+                st.metric("Logistic Model", f"{applicant['score_logistic']:.3f}")
+            if pd.notna(applicant['score_xgb']):
+                st.metric("XGBoost Model", f"{applicant['score_xgb']:.3f}")
+            if pd.notna(applicant['average_score']):
+                st.metric("Final Score", f"{applicant['average_score']:.3f}")
     
-    # Current mode status
-    col1, col2 = st.columns(2)
+    # Action buttons
+    st.markdown("---")
+    col1, col2, col3, col4 = st.columns(4)
+    
     with col1:
-        if st.session_state.offline_mode:
-            st.success("📴 Currently in Offline Mode")
-            st.info("✅ All operations are stored locally")
-        else:
-            st.success("🌐 Currently Online")
-            st.info("✅ Data can be synced to central server")
-    
-    with col2:
-        # Mode toggle
-        new_mode = st.toggle("Enable Offline Mode", value=st.session_state.offline_mode)
-        if new_mode != st.session_state.offline_mode:
-            st.session_state.offline_mode = new_mode
-            if new_mode:
-                st.success("📴 Switched to Offline Mode")
-            else:
-                st.success("🌐 Switched to Online Mode")
+        if st.button("AI Insights", type="secondary", use_container_width=True):
+            st.session_state.current_page = 'explainability'
             st.rerun()
     
-    # Sync status and controls
-    st.markdown("---")
-    st.subheader("🔄 Data Synchronization")
-    
-    sync_status = get_sync_status()
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Records", sync_status['total_records'])
     with col2:
-        st.metric("Unsynced Records", sync_status['unsynced_records'])
+        if pd.notna(applicant['total_trust_score']):
+            if st.button("Generate Report", type="secondary", use_container_width=True):
+                st.session_state.current_page = 'kfs'
+                st.rerun()
+    
     with col3:
-        st.metric("Processed Records", sync_status['processed_records'])
+        if st.button("Edit Data", type="secondary", use_container_width=True):
+            st.info("Edit functionality coming soon...")
+    
     with col4:
-        sync_pct = sync_status['sync_percentage']
-        st.metric("Sync Progress", f"{sync_pct:.1f}%")
+        if st.button("Back to Dashboard", use_container_width=True):
+            st.session_state.current_page = 'home'
+            st.rerun()
     
-    # Sync controls
-    if not st.session_state.offline_mode:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("🔄 Sync Now", type="primary"):
-                with st.spinner("Syncing data..."):
-                    synced_count = sync_data_to_csv()
-                    if synced_count > 0:
-                        st.success(f"✅ Successfully synced {synced_count} records")
-                        st.rerun()
-                    else:
-                        st.info("📡 No records to sync")
-        
-        with col2:
-            if st.button("📊 View Sync Log"):
-                # Show sync history (placeholder)
-                st.info("📋 Sync log functionality available in full version")
+    # Detailed data view
+    with st.expander("View Complete Assessment Data"):
+        st.dataframe(applicant_data, use_container_width=True)
     
-    else:
-        st.warning("⚠️ Sync is disabled in offline mode")
-        st.info("💡 Switch to online mode to enable data synchronization")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def main():
+    """Main application function."""
+    st.set_page_config(
+        page_title="Z-Cred Risk Assessment Platform",
+        page_icon="🏦",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
     
-    # Local data overview
-    st.markdown("---")
-    st.subheader("💾 Local Database Overview")
+    # Load CSS
+    load_css()
     
-    applicants_df = get_applicants()
+    # Initialize authentication and database
+    init_auth()
+    init_db()
     
-    if len(applicants_df) > 0:
-        # Status breakdown
-        status_counts = applicants_df['final_status'].value_counts()
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("📊 Status Distribution")
-            for status, count in status_counts.items():
-                st.write(f"**{status}:** {count}")
-        
-        with col2:
-            st.subheader("🕒 Recent Activity")
-            recent = applicants_df.sort_values('created_timestamp', ascending=False).head(5)
-            for _, row in recent.iterrows():
-                st.write(f"• {row['applicant_name']} - {row.get('final_status', 'Pending')}")
+    # Check authentication
+    if not require_auth():
+        auth_page()
+        return
     
-    else:
-        st.info("📝 No local data found. Start onboarding applicants!")
+    # Render sidebar
+    render_sidebar()
     
-    # Data export/backup
-    st.markdown("---")
-    st.subheader("📁 Data Management")
+    # Get current page
+    current_page = st.session_state.get('current_page', 'home')
     
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("💾 Create Backup"):
-            try:
-                from local_db import export_database_backup
-                backup_path = export_database_backup()
-                st.success(f"✅ Backup created: {backup_path}")
-            except Exception as e:
-                st.error(f"❌ Backup failed: {e}")
-    
-    with col2:
-        if st.button("🗑️ Clear Local Data"):
-            if st.checkbox("I understand this will delete all local data"):
-                try:
-                    from local_db import reset_database
-                    reset_database()
-                    st.success("✅ Local database cleared")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Clear failed: {e}")
+    # Route to appropriate page
+    if current_page == 'home':
+        home_page()
+    elif current_page == 'add_applicant':
+        add_applicant_page()
+    elif current_page == 'applicant_details':
+        applicant_details_page()
+    elif current_page == 'explainability':
+        st.markdown('<h1 class="page-header">AI Insights & Explainability</h1>', unsafe_allow_html=True)
+        st.info("This feature will provide SHAP explanations and AI insights for risk decisions.")
+    elif current_page == 'kfs':
+        st.markdown('<h1 class="page-header">Credit Report Generator</h1>', unsafe_allow_html=True)
+        st.info("This feature will generate comprehensive credit reports and Key Fact Statements.")
+    elif current_page == 'offline':
+        st.markdown('<h1 class="page-header">Data Synchronization</h1>', unsafe_allow_html=True)
+        st.info("This feature manages offline/online data synchronization and backup.")
+    elif current_page == 'settings':
+        st.markdown('<h1 class="page-header">Account Settings</h1>', unsafe_allow_html=True)
+        st.info("User preferences, account settings, and system configuration.")
+
+if __name__ == "__main__":
+    main()
