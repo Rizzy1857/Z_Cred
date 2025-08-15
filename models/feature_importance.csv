@@ -1,0 +1,9 @@
+feature,importance
+prev_loans_defaulted,0.45855406
+avg_bill_delay_days,0.4340964
+on_time_payment_ratio,0.07732879
+stable_location_ratio,0.018524464
+community_endorsements,0.009478275
+sim_card_tenure_months,0.0016673673
+recharge_frequency_per_month,0.00035070395
+prev_loans_taken,0.0

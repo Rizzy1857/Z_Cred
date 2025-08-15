@@ -1,0 +1,27 @@
+{
+  "logistic_regression": {
+    "auc": 1.0,
+    "f1": 1.0,
+    "precision": 1.0,
+    "recall": 1.0
+  },
+  "xgboost": {
+    "auc": 1.0,
+    "f1": 0.9932885906040269,
+    "precision": 1.0,
+    "recall": 0.9866666666666667
+  },
+  "feature_columns": [
+    "avg_bill_delay_days",
+    "on_time_payment_ratio",
+    "prev_loans_taken",
+    "prev_loans_defaulted",
+    "community_endorsements",
+    "sim_card_tenure_months",
+    "recharge_frequency_per_month",
+    "stable_location_ratio"
+  ],
+  "train_size": 700,
+  "test_size": 300,
+  "random_state": 42
+}
